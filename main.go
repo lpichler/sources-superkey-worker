@@ -1,34 +1,35 @@
 package main
 
 import (
-	"encoding/json"
 	"fmt"
 	"io"
-	"io/ioutil"
 	"net/http"
 	"os"
+	"os/signal"
+	"syscall"
 	"time"
 
+	"github.com/RedHatInsights/sources-api-go/kafka"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 	"github.com/redhatinsights/sources-superkey-worker/config"
 	l "github.com/redhatinsights/sources-superkey-worker/logger"
-	"github.com/redhatinsights/sources-superkey-worker/messaging"
 	"github.com/redhatinsights/sources-superkey-worker/provider"
 	"github.com/redhatinsights/sources-superkey-worker/superkey"
-	"github.com/segmentio/kafka-go"
+	"github.com/sirupsen/logrus"
+)
+
+const (
+	superkeyRequestedTopic = "platform.sources.superkey-requests"
 )
 
 var (
-	// SuperKeyRequestQueue - the queue to listen on for superkey requests
-	SuperKeyRequestQueue = "platform.sources.superkey-requests"
-
 	// DisableCreation disabled processing `create_application` sk requests
 	DisableCreation = os.Getenv("DISABLE_RESOURCE_CREATION")
 	// DisableDeletion disabled processing `destroy_application` sk requests
 	DisableDeletion = os.Getenv("DISABLE_RESOURCE_DELETION")
 
-	conf           = config.Get()
-	identityHeader string
+	conf          = config.Get()
+	superkeyTopic = conf.KafkaTopic(superkeyRequestedTopic)
 )
 
 func main() {
@@ -37,31 +38,53 @@ func main() {
 	initMetrics()
 	initHealthCheck()
 
-	l.Log.Infof("Listening to Kafka at: %v", conf.KafkaBrokers)
-	l.Log.Infof("Talking to Sources API at: %v", fmt.Sprintf("%v://%v:%v", conf.SourcesScheme, conf.SourcesHost, conf.SourcesPort))
+	l.Log.Infof("Listening to Kafka at: %s:%d, topic: %v", conf.KafkaBrokerConfig.Hostname, conf.KafkaBrokerConfig.Port, superkeyTopic)
+	l.Log.Infof("Talking to Sources API at: [%v] using PSK [%v]", fmt.Sprintf("%v://%v:%v", conf.SourcesScheme, conf.SourcesHost, conf.SourcesPort), conf.SourcesPSK)
 
-	l.Log.Info("SuperKey Worker started.")
-
-	// returns real topic name from config (identical in local and app-interface mode)
-	requestQueue, found := conf.KafkaTopics[SuperKeyRequestQueue]
-	if !found {
-		requestQueue = SuperKeyRequestQueue
+	reader, err := kafka.GetReader(&kafka.Options{
+		BrokerConfig: &conf.KafkaBrokerConfig,
+		Topic:        superkeyTopic,
+		GroupID:      &conf.KafkaGroupID,
+		Logger:       l.Log.WithField("kafka", ""),
+	})
+	if err != nil {
+		l.Log.Fatalf(`could not get Kafka reader: %s`, err)
 	}
 
-	// anonymous function, kinda like passing a block in ruby.
-	messaging.ConsumeWithFunction(requestQueue, func(msg kafka.Message) {
-		l.Log.Infof("Started processing message %s", string(msg.Value))
-		processSuperkeyRequest(msg)
-		l.Log.Infof("Finished processing message %s", string(msg.Value))
-	})
+	go func() {
+		l.Log.Info("SuperKey Worker started.")
+
+		kafka.Consume(
+			reader,
+			func(msg kafka.Message) {
+				l.Log.Infof("Started processing message %s", string(msg.Value))
+				processSuperkeyRequest(msg)
+				l.Log.Infof("Finished processing message %s", string(msg.Value))
+			},
+		)
+	}()
+
+	interrupts := make(chan os.Signal, 1)
+	signal.Notify(interrupts, os.Interrupt, syscall.SIGTERM)
+
+	// wait for a signal from the OS, gracefully terminating the consumer
+	// if/when that comes in
+	s := <-interrupts
+
+	l.Log.Infof("Received %v, exiting", s)
+	kafka.CloseReader(reader, "superkey reader")
+	os.Exit(0)
 }
 
 // processSuperkeyRequest - processes messages.
 func processSuperkeyRequest(msg kafka.Message) {
-	eventType := getHeader("event_type", msg.Headers)
-	identityHeader = getHeader("x-rh-identity", msg.Headers)
-	if identityHeader == "" {
-		l.Log.Warnf("No x-rh-identity header found for message, skipping...")
+	eventType := msg.GetHeader("event_type")
+	identityHeader := msg.GetHeader("x-rh-identity")
+	orgIdHeader := msg.GetHeader("x-rh-sources-org-id")
+
+	if identityHeader == "" && orgIdHeader == "" {
+		l.Log.WithFields(logrus.Fields{"kafka_message": msg}).Warn(`no "x-rh-identity" or "x-rh-sources-org-id" headers found, skipping...`)
+		return
 	}
 
 	switch eventType {
@@ -72,11 +95,14 @@ func processSuperkeyRequest(msg kafka.Message) {
 		}
 
 		l.Log.Info("Processing `create_application` request")
-		req, err := parseSuperKeyCreateRequest(msg.Value)
+		req := &superkey.CreateRequest{}
+		err := msg.ParseTo(req)
 		if err != nil {
 			l.Log.Warnf("Error parsing request: %v", err)
 			return
 		}
+		req.IdentityHeader = identityHeader
+		req.OrgIdHeader = orgIdHeader
 
 		createResources(req)
 		l.Log.Infof("Finished processing `create_application` request for tenant %v type %v", req.TenantID, req.ApplicationType)
@@ -88,7 +114,8 @@ func processSuperkeyRequest(msg kafka.Message) {
 		}
 
 		l.Log.Info("Processing `destroy_application` request")
-		req, err := parseSuperKeyDestroyRequest(msg.Value)
+		req := &superkey.DestroyRequest{}
+		err := msg.ParseTo(req)
 		if err != nil {
 			l.Log.Warnf("Error parsing request: %v", err)
 			return
@@ -116,7 +143,7 @@ func createResources(req *superkey.CreateRequest) {
 			}
 		}
 
-		err := req.MarkSourceUnavailable(err, newApp, identityHeader)
+		err := req.MarkSourceUnavailable(err, newApp)
 		if err != nil {
 			l.Log.Errorf("Error during PATCH unavailable to application/source: %v", err)
 		}
@@ -125,7 +152,7 @@ func createResources(req *superkey.CreateRequest) {
 	}
 	l.Log.Infof("Finished Forging request: %v", req)
 
-	err = newApp.CreateInSourcesAPI(identityHeader)
+	err = newApp.CreateInSourcesAPI()
 	if err != nil {
 		l.Log.Errorf("Failed to POST req to sources-api: %v, tearing down.", req)
 		provider.TearDown(newApp)
@@ -141,36 +168,6 @@ func destroyResources(req *superkey.DestroyRequest) {
 		}
 	}
 	l.Log.Infof("Finished Un-Forging request: %v", req)
-}
-
-func parseSuperKeyCreateRequest(value []byte) (*superkey.CreateRequest, error) {
-	request := superkey.CreateRequest{}
-	err := json.Unmarshal(value, &request)
-	if err != nil {
-		return nil, err
-	}
-
-	return &request, nil
-}
-
-func parseSuperKeyDestroyRequest(value []byte) (*superkey.DestroyRequest, error) {
-	request := superkey.DestroyRequest{}
-	err := json.Unmarshal(value, &request)
-	if err != nil {
-		return nil, err
-	}
-
-	return &request, nil
-}
-
-func getHeader(name string, headers []kafka.Header) string {
-	for _, header := range headers {
-		if header.Key == name {
-			return string(header.Value)
-		}
-	}
-
-	return ""
 }
 
 func initMetrics() {
@@ -199,7 +196,7 @@ func initHealthCheck() {
 
 				if err == nil && resp.StatusCode == 200 {
 					// Copying to the bitbucket in order to gc the memory.
-					_, err := io.Copy(ioutil.Discard, resp.Body)
+					_, err := io.Copy(io.Discard, resp.Body)
 					if err != nil {
 						l.Log.Errorf("Error discarding response body: %v", err)
 					}

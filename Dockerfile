@@ -1,23 +1,15 @@
-FROM registry.access.redhat.com/ubi8/ubi-minimal:8.4-205 as build
-MAINTAINER jlindgre@redhat.com
-
-RUN mkdir /build
+FROM registry.access.redhat.com/ubi8/ubi-minimal:latest as build
 WORKDIR /build
 
 RUN microdnf install go
 
 COPY go.mod .
-RUN go mod download 
+RUN go mod download
 
 COPY . .
 RUN go build
 
-FROM registry.access.redhat.com/ubi8/ubi-minimal:8.4-205
+FROM registry.access.redhat.com/ubi8/ubi-minimal:latest
 COPY --from=build /build/sources-superkey-worker /sources-superkey-worker
 
-RUN curl -L -o /usr/bin/haberdasher \
-    https://github.com/RedHatInsights/haberdasher/releases/latest/download/haberdasher_linux_amd64 && \
-    chmod 755 /usr/bin/haberdasher
-
-ENTRYPOINT ["/usr/bin/haberdasher"]
-CMD ["/sources-superkey-worker"]
+ENTRYPOINT ["/sources-superkey-worker"]

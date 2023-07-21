@@ -1,11 +1,14 @@
 package superkey
 
 import (
-	sourcesapi "github.com/lindgrenj6/sources-api-client-go"
+	"github.com/RedHatInsights/sources-api-go/model"
+	"github.com/redhatinsights/sources-superkey-worker/sources"
 )
 
 // CreateRequest - struct representing a request for a superkey
 type CreateRequest struct {
+	IdentityHeader  string            `json:"identity_header"`
+	OrgIdHeader     string            `json:"org_id_header"`
 	TenantID        string            `json:"tenant_id"`
 	SourceID        string            `json:"source_id"`
 	ApplicationID   string            `json:"application_id"`
@@ -38,9 +41,9 @@ type DestroyRequest struct {
 // App - represents an application that can be posted to sources after being
 // populated
 type App struct {
-	SourceID    string                                      `json:"source_id"`
-	Extra       map[string]interface{}                      `json:"extra"`
-	AuthPayload sourcesapi.BulkCreatePayloadAuthentications `json:"authentication_payload"`
+	SourceID    string                            `json:"source_id"`
+	Extra       map[string]interface{}            `json:"extra"`
+	AuthPayload model.AuthenticationCreateRequest `json:"authentication_payload"`
 }
 
 // ForgedApplication - struct to hold the output of a superkey
@@ -51,6 +54,7 @@ type ForgedApplication struct {
 	Request        *CreateRequest
 	Client         Provider
 	GUID           string
+	SourcesClient  *sources.SourcesClient
 }
 
 // Provider the interface for all of the superkey providers currently just a

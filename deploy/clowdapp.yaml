@@ -23,20 +23,22 @@ objects:
           value: ${DISABLE_RESOURCE_CREATION}
         - name: DISABLE_RESOURCE_DELETION
           value: ${DISABLE_RESOURCE_DELETION}
-        - name: HABERDASHER_EMITTER
-          value: ${HABERDASHER_EMITTER}
-        - name: HABERDASHER_KAFKA_BOOTSTRAP
-          value: ${HABERDASHER_KAFKA_BOOTSTRAP}
-        - name: HABERDASHER_KAFKA_TOPIC
-          value: ${HABERDASHER_KAFKA_TOPIC}
         - name: SOURCES_SCHEME
           value: ${SOURCES_SCHEME}
         - name: SOURCES_HOST
           value: ${SOURCES_HOST}
         - name: SOURCES_PORT
           value: ${SOURCES_PORT}
+        - name: SOURCES_PSK
+          valueFrom:
+            secretKeyRef:
+              name: internal-psk
+              key: psk
+              optional: true
         - name: LOG_HANDLER
           value: ${LOG_HANDLER}
+        - name: AWS_WAIT_TIME
+          value: ${AWS_WAIT_TIME}
         resources:
           limits:
             cpu: ${CPU_LIMIT}
@@ -73,15 +75,6 @@ parameters:
 - description: Clowder ENV
   name: ENV_NAME
   required: true
-- description: Emitter for haberdasher logs [stderr|kafka]
-  name: HABERDASHER_EMITTER
-  value: stderr
-- description: Bootstrap server for haberdasher kafka emitter
-  name: HABERDASHER_KAFKA_BOOTSTRAP
-  value: ''
-- description: Kafka topic for haberdasher kafka emitter
-  name: HABERDASHER_KAFKA_TOPIC
-  value: ''
 - description: Image
   name: IMAGE
   value: quay.io/cloudservices/sources-superkey-worker
@@ -96,10 +89,10 @@ parameters:
 - name: MEMORY_LIMIT
   value: "50Mi"
 - name: MEMORY_REQUEST
-  value: "25Mi"  
+  value: "25Mi"
 - name: MIN_REPLICAS
   description: The number of replicas to use for the prometheus deployment
-  value: "1"                               
+  value: "1"
 - name: SOURCES_SCHEME
   displayName: Sources Service Scheme
   description: Scheme to use for the Sources service URL.
@@ -112,3 +105,7 @@ parameters:
   displayName: Sources Service Port
   description: Port to use for the Sources service URL.
   value: "8000"
+- name: AWS_WAIT_TIME
+  displayName: AWS Wait Time
+  description: Time to sleep between creating the resources and posting back to Sources API
+  value: "15"
